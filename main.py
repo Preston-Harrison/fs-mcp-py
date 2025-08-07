@@ -38,12 +38,12 @@ Requires:
 
 from __future__ import annotations
 
+import argparse
 import difflib
 import fnmatch
 import json
 import os
 import re
-import sys
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -53,14 +53,38 @@ import pathspec
 mcp = FastMCP("Filesystem MCP")
 
 # --------------------------------------------------------------------------- #
-#  Allowed-directory handling
+#  Configuration and allowed-directory handling
 # --------------------------------------------------------------------------- #
 
 ALLOWED_DIRS: List[Path] = []
+READ_ONLY_MODE: bool = False
 
 
-def _init_allowed_dirs() -> None:
-    roots = sys.argv[1:] or [os.getcwd()]
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Filesystem MCP Server",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="If no directories are specified, the current working directory is used.",
+    )
+    parser.add_argument(
+        "--read-only",
+        action="store_true",
+        help="Enable read-only mode (disables write operations like create, delete, move, edit)",
+    )
+    parser.add_argument(
+        "directories",
+        nargs="*",
+        help="Allowed directory roots for filesystem operations",
+    )
+    return parser.parse_args()
+
+
+def _init_config() -> None:
+    global READ_ONLY_MODE
+    args = _parse_args()
+    READ_ONLY_MODE = args.read_only
+
+    roots = args.directories or [os.getcwd()]
     for p in roots:
         root = Path(p).resolve()
         if not root.exists():
@@ -68,11 +92,14 @@ def _init_allowed_dirs() -> None:
         ALLOWED_DIRS.append(root)
 
 
-_init_allowed_dirs()
+_init_config()
 
 print("Allowed directories:")
 for dir in ALLOWED_DIRS:
     print("- ", dir)
+
+if READ_ONLY_MODE:
+    print("Running in READ-ONLY mode - write operations disabled")
 
 
 def _resolve(path: str | Path) -> Path:
@@ -165,79 +192,85 @@ def list_allowed_directories() -> List[str]:
     return [str(p) for p in ALLOWED_DIRS]
 
 
-@mcp.tool
-def create_file(path: str, content: str) -> str:
-    """Create a new file with specified content.
+if not READ_ONLY_MODE:
 
-    Args:
-        path (str): File path to create (absolute or relative to allowed directories)
-        content (str): UTF-8 text content to write to the file
+    @mcp.tool
+    def create_file(path: str, content: str) -> str:
+        """Create a new file with specified content.
 
-    Returns:
-        str: Success message with created file path, or error message if failed
+        Args:
+            path (str): File path to create (absolute or relative to allowed directories)
+            content (str): UTF-8 text content to write to the file
 
-    Note:
-        - Fails if the file already exists
-        - Creates parent directories if they don't exist
-        - Path must be within allowed directory roots
-    """
-    try:
-        rp = _resolve(path)
-        rp.parent.mkdir(parents=True, exist_ok=True)
-        with rp.open("x", encoding="utf-8") as f:
-            f.write(content)
-        return f"Created {rp}"
-    except Exception as e:
-        return _human_error(e, "creating file")
+        Returns:
+            str: Success message with created file path, or error message if failed
 
-
-@mcp.tool
-def delete_file(path: str) -> str:
-    """Delete a file from the filesystem.
-
-    Args:
-        path (str): File path to delete (absolute or relative to allowed directories)
-
-    Returns:
-        str: Success message with deleted file path, or error message if failed
-
-    Note:
-        - Path must be within allowed directory roots
-        - Fails if file doesn't exist or cannot be deleted
-    """
-    try:
-        rp = _resolve(path)
-        rp.unlink()
-        return f"Deleted {rp}"
-    except Exception as e:
-        return _human_error(e, "deleting file")
+        Note:
+            - Fails if the file already exists
+            - Creates parent directories if they don't exist
+            - Path must be within allowed directory roots
+        """
+        try:
+            rp = _resolve(path)
+            rp.parent.mkdir(parents=True, exist_ok=True)
+            with rp.open("x", encoding="utf-8") as f:
+                f.write(content)
+            return f"Created {rp}"
+        except Exception as e:
+            return _human_error(e, "creating file")
 
 
-@mcp.tool
-def move_file(src: str, dst: str) -> str:
-    """Move or rename a file from source to destination.
+if not READ_ONLY_MODE:
 
-    Args:
-        src (str): Source file path (absolute or relative to allowed directories)
-        dst (str): Destination file path (absolute or relative to allowed directories)
+    @mcp.tool
+    def delete_file(path: str) -> str:
+        """Delete a file from the filesystem.
 
-    Returns:
-        str: Success message with source and destination paths, or error message if failed
+        Args:
+            path (str): File path to delete (absolute or relative to allowed directories)
 
-    Note:
-        - Both paths must be within allowed directory roots
-        - Fails if destination already exists
-        - Creates parent directories for destination if needed
-    """
-    try:
-        src_p, dst_p = _resolve(src), _resolve(dst)
-        if dst_p.exists():
-            return f"Error moving file: destination '{dst_p}' already exists"
-        dst_p.parent.mkdir(parents=True, exist_ok=True)
-        src_p.rename(dst_p)
-        return f"Moved {src_p} → {dst_p}"
-    except Exception as e:
-        return _human_error(e, "moving file")
+        Returns:
+            str: Success message with deleted file path, or error message if failed
+
+        Note:
+            - Path must be within allowed directory roots
+            - Fails if file doesn't exist or cannot be deleted
+        """
+        try:
+            rp = _resolve(path)
+            rp.unlink()
+            return f"Deleted {rp}"
+        except Exception as e:
+            return _human_error(e, "deleting file")
+
+
+if not READ_ONLY_MODE:
+
+    @mcp.tool
+    def move_file(src: str, dst: str) -> str:
+        """Move or rename a file from source to destination.
+
+        Args:
+            src (str): Source file path (absolute or relative to allowed directories)
+            dst (str): Destination file path (absolute or relative to allowed directories)
+
+        Returns:
+            str: Success message with source and destination paths, or error message if failed
+
+        Note:
+            - Both paths must be within allowed directory roots
+            - Fails if destination already exists
+            - Creates parent directories for destination if needed
+        """
+        try:
+            src_p, dst_p = _resolve(src), _resolve(dst)
+            if dst_p.exists():
+                return f"Error moving file: destination '{dst_p}' already exists"
+            dst_p.parent.mkdir(parents=True, exist_ok=True)
+            src_p.rename(dst_p)
+            return f"Moved {src_p} → {dst_p}"
+        except Exception as e:
+            return _human_error(e, "moving file")
 
 
 @mcp.tool
@@ -308,27 +341,29 @@ def directory_tree(path: str) -> str:
         return _human_error(e, "enumerating directory")
 
 
-@mcp.tool
-def create_directory(path: str) -> str:
-    """Create a directory, including any necessary parent directories.
+if not READ_ONLY_MODE:
 
-    Args:
-        path (str): Directory path to create (absolute or relative to allowed directories)
+    @mcp.tool
+    def create_directory(path: str) -> str:
+        """Create a directory, including any necessary parent directories.
 
-    Returns:
-        str: Success message with created directory path, or error message if failed
+        Args:
+            path (str): Directory path to create (absolute or relative to allowed directories)
 
-    Note:
-        - Path must be within allowed directory roots
-        - Creates parent directories if they don't exist
-        - No error if directory already exists
-    """
-    try:
-        rp = _resolve(path)
-        rp.mkdir(parents=True, exist_ok=True)
-        return f"Ensured directory {rp}"
-    except Exception as e:
-        return _human_error(e, "creating directory")
+        Returns:
+            str: Success message with created directory path, or error message if failed
+
+        Note:
+            - Path must be within allowed directory roots
+            - Creates parent directories if they don't exist
+            - No error if directory already exists
+        """
+        try:
+            rp = _resolve(path)
+            rp.mkdir(parents=True, exist_ok=True)
+            return f"Ensured directory {rp}"
+        except Exception as e:
+            return _human_error(e, "creating directory")
 
 
 @mcp.tool
@@ -494,57 +529,61 @@ def grep(dir: str, pattern: str, exclude: str | None = None) -> str:
         return _human_error(e, "grepping")
 
 
-@mcp.tool
-def edit_file(path: str, edits: List[Dict[str, str]]) -> str:
-    """Apply multiple text replacements to a file and return a unified diff.
+if not READ_ONLY_MODE:
 
-    Args:
-        path (str): File path to edit (absolute or relative to allowed directories)
-        edits (List[Dict[str, str]]): List of edit operations, each with 'oldText' and 'newText' keys
+    @mcp.tool
+    def edit_file(path: str, edits: List[Dict[str, str]]) -> str:
+        """Apply multiple text replacements to a file and return a unified diff.
 
-    Returns:
-        str: Unified diff showing changes made, or error message if failed
+        Args:
+            path (str): File path to edit (absolute or relative to allowed directories)
+            edits (List[Dict[str, str]]): List of edit operations, each with 'oldText' and 'newText' keys
 
-    Note:
-        - Path must be within allowed directory roots
-        - File must be a UTF-8 text file
-        - Edits are applied sequentially in the order provided
-        - Each 'oldText' must match exactly (first occurrence is replaced)
-        - Returns unified diff format showing before/after changes
-        - File is atomically updated using temporary file
-        - If no changes made, returns 'No changes made.'
-    """
-    try:
-        rp = _resolve(path)
-        if not _is_text(rp):
-            return f"Error editing file: '{rp}' is not a UTF-8 text file or is binary"
-        original = rp.read_text(encoding="utf-8")
-        modified = original
-        for i, edit in enumerate(edits):
-            old = edit.get("oldText", "")
-            new = edit.get("newText", "")
-            if old not in modified:
-                return f"Error editing file: could not find text to replace in edit {i + 1}. Make sure the text matches exactly:\n{old}"
-            modified = modified.replace(old, new, 1)
+        Returns:
+            str: Unified diff showing changes made, or error message if failed
 
-        if modified == original:
-            return "No changes made."
+        Note:
+            - Path must be within allowed directory roots
+            - File must be a UTF-8 text file
+            - Edits are applied sequentially in the order provided
+            - Each 'oldText' must match exactly (first occurrence is replaced)
+            - Returns unified diff format showing before/after changes
+            - File is atomically updated using temporary file
+            - If no changes made, returns 'No changes made.'
+        """
+        try:
+            rp = _resolve(path)
+            if not _is_text(rp):
+                return (
+                    f"Error editing file: '{rp}' is not a UTF-8 text file or is binary"
+                )
+            original = rp.read_text(encoding="utf-8")
+            modified = original
+            for i, edit in enumerate(edits):
+                old = edit.get("oldText", "")
+                new = edit.get("newText", "")
+                if old not in modified:
+                    return f"Error editing file: could not find text to replace in edit {i + 1}. Make sure the text matches exactly:\n{old}"
+                modified = modified.replace(old, new, 1)
 
-        diff = "\n".join(
-            difflib.unified_diff(
-                original.splitlines(),
-                modified.splitlines(),
-                fromfile=str(rp),
-                tofile=str(rp),
-                lineterm="",
+            if modified == original:
+                return "No changes made."
+
+            diff = "\n".join(
+                difflib.unified_diff(
+                    original.splitlines(),
+                    modified.splitlines(),
+                    fromfile=str(rp),
+                    tofile=str(rp),
+                    lineterm="",
+                )
             )
-        )
-        tmp = rp.with_suffix(rp.suffix + ".tmp")
-        tmp.write_text(modified, encoding="utf-8")
-        tmp.replace(rp)
-        return diff
-    except Exception as e:
-        return _human_error(e, "editing file")
+            tmp = rp.with_suffix(rp.suffix + ".tmp")
+            tmp.write_text(modified, encoding="utf-8")
+            tmp.replace(rp)
+            return diff
+        except Exception as e:
+            return _human_error(e, "editing file")
 
 
 # --------------------------------------------------------------------------- #
