@@ -128,21 +128,21 @@ def _is_text(path: Path, sample: int = 2048) -> bool:
         return False
 
 
-def _gitignore_spec(directory: Path) -> Optional[pathspec.PathSpec]:
+def _ignore_spec(directory: Path) -> Optional[pathspec.PathSpec]:
     gitignore = directory / ".gitignore"
     if gitignore.exists():
         return pathspec.PathSpec.from_lines(
-            "gitwildmatch", gitignore.read_text().splitlines()
+            "gitwildmatch", [*gitignore.read_text().splitlines(), *DEFAULT_IGNORE_FILES]
         )
     return None
 
 
-def _skip_gitignored(
+def _skip_ignored(
     file: Path, root: Path, spec_cache: Dict[Path, Optional[pathspec.PathSpec]]
 ) -> bool:
     """Return True if *file* should be ignored due to a .gitignore in *root*."""
     if root not in spec_cache:
-        spec_cache[root] = _gitignore_spec(root)
+        spec_cache[root] = _ignore_spec(root)
     spec = spec_cache[root]
     if not spec:
         return False
@@ -176,6 +176,8 @@ GREP_IGNORE_FILES = [
     "*.lock",
     "package-lock.json",
 ]
+
+DEFAULT_IGNORE_FILES = [".*/"]
 
 # --------------------------------------------------------------------------- #
 #  MCP tools
@@ -325,14 +327,27 @@ def directory_tree(path: str) -> str:
     """
     try:
         rp = _resolve(path)
+        spec_cache: Dict[Path, Optional[pathspec.PathSpec]] = {}
 
         def build(node: Path):
             if node.is_dir():
+                children = [build(c) for c in sorted(node.iterdir())]
+                filtered = [c for c in children if c is not None]
+
+                if _skip_ignored(node, rp, spec_cache) and len(filtered) == 0:
+                    return None
+                
+                omitted = len(children) != 0 and len(filtered) == 0
+
                 return {
                     "name": node.name,
                     "type": "directory",
-                    "children": [build(c) for c in sorted(node.iterdir())],
+                    "children": "OMITTED" if omitted else filtered,
                 }
+
+            if _skip_ignored(node, rp, spec_cache):
+                return None
+
             return {"name": node.name, "type": "file"}
 
         tree = build(rp)
@@ -438,7 +453,7 @@ def search_files(dir: str, pattern: str, exclude: str | None = None) -> List[str
     Note:
         - Directory must be within allowed directory roots
         - Searches recursively through subdirectories
-        - Respects .gitignore files
+        - Respects .gitignore files, and ignores hidden files and folders
         - Returns list for successful searches, string for errors
     """
     try:
@@ -454,7 +469,7 @@ def search_files(dir: str, pattern: str, exclude: str | None = None) -> List[str
                 continue
             if not fnmatch.fnmatch(file.name, pattern):
                 continue
-            if _skip_gitignored(file, root, spec_cache):
+            if _skip_ignored(file, root, spec_cache):
                 continue
             matches.append(str(file))
         return matches
@@ -512,7 +527,7 @@ def grep(dir: str, pattern: str, exclude: str | None = None) -> str:
                 continue
             if exclude_spec and exclude_spec.match_file(file):
                 continue
-            if _skip_gitignored(file, root, spec_cache):
+            if _skip_ignored(file, root, spec_cache):
                 continue
             if not _is_text(file):
                 continue
