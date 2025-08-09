@@ -41,10 +41,12 @@ from __future__ import annotations
 import argparse
 import difflib
 import fnmatch
+from itertools import islice
 import json
 import os
 import re
 from pathlib import Path
+import sys
 from typing import Dict, List, Optional
 
 from fastmcp import FastMCP
@@ -132,7 +134,7 @@ def _ignore_spec(directory: Path) -> Optional[pathspec.PathSpec]:
     gitignore = directory / ".gitignore"
     if gitignore.exists():
         return pathspec.PathSpec.from_lines(
-            "gitwildmatch", [*gitignore.read_text().splitlines(), *DEFAULT_IGNORE_FILES]
+            "gitwildmatch", gitignore.read_text().splitlines()
         )
     return None
 
@@ -150,6 +152,11 @@ def _skip_ignored(
         rel = file.relative_to(root)
     except ValueError:
         return False
+
+    for pattern in DEFAULT_IGNORE_FILES:
+        if rel.match(pattern):
+            return True
+
     return spec.match_file(str(rel))
 
 
@@ -311,47 +318,60 @@ def read_text_file(
 
 @mcp.tool
 def directory_tree(path: str) -> str:
-    """Generate a recursive JSON tree structure of a directory.
+    """Generate a plain text tree structure of a directory.
 
     Args:
         path (str): Directory path to generate tree for (absolute or relative to allowed directories)
 
     Returns:
-        str: JSON representation of directory tree with 2-space indentation, or error message if failed
-
-    Note:
-        - Path must be within allowed directory roots
-        - Returns nested structure with 'name', 'type', and 'children' fields
-        - Types are either 'directory' or 'file'
-        - Directories include 'children' array, files do not
+        str: Plain text representation of directory tree, or error message if failed
     """
     try:
         rp = _resolve(path)
         spec_cache: Dict[Path, Optional[pathspec.PathSpec]] = {}
+        space =  '    '
+        branch = '│   '
+        tee =    '├── '
+        last =   '└── '
 
-        def build(node: Path):
-            if node.is_dir():
-                children = [build(c) for c in sorted(node.iterdir())]
-                filtered = [c for c in children if c is not None]
+        def tree(dir_path: Path, level: int=-1, limit_to_directories: bool=False, length_limit: int=500):
+            """Given a directory Path object print a visual tree structure"""
+            result = ""
+            dir_path = Path(dir_path) # accept string coerceable to Path
+            files = 0
+            directories = 0
+            def inner(dir_path: Path, prefix: str='', level=-1):
+                nonlocal files, directories
+                # print(dir_path, _skip_ignored(dir_path, rp, spec_cache), file=sys.stderr)
+                if _skip_ignored(dir_path, rp, spec_cache):
+                    return
+                if not level: 
+                    return # 0, stop iterating
+                if limit_to_directories:
+                    contents = [d for d in dir_path.iterdir() if d.is_dir()]
+                else: 
+                    contents = list(dir for dir in dir_path.iterdir() )
 
-                if _skip_ignored(node, rp, spec_cache) and len(filtered) == 0:
-                    return None
-                
-                omitted = len(children) != 0 and len(filtered) == 0
+                pointers = [tee] * (len(contents) - 1) + [last]
+                for pointer, path in zip(pointers, contents):
+                    if path.is_dir():
+                        yield prefix + pointer + path.name
+                        directories += 1
+                        extension = branch if pointer == tee else space 
+                        yield from inner(path, prefix=prefix+extension, level=level-1)
+                    elif not limit_to_directories:
+                        yield prefix + pointer + path.name
+                        files += 1
+            result += dir_path.name + "\n"
+            iterator = inner(dir_path, level=level)
+            for line in islice(iterator, length_limit):
+                result += line + "\n"
+            if next(iterator, None):
+                result += f'... length_limit, {length_limit}, reached, counted:\n'
+            result += f'\n{directories} directories' + (f', {files} files' if files else '') + "\n"
+            return result
 
-                return {
-                    "name": node.name,
-                    "type": "directory",
-                    "children": "OMITTED" if omitted else filtered,
-                }
-
-            if _skip_ignored(node, rp, spec_cache):
-                return None
-
-            return {"name": node.name, "type": "file"}
-
-        tree = build(rp)
-        return json.dumps(tree, indent=2)
+        return tree(rp)
     except Exception as e:
         return _human_error(e, "enumerating directory")
 
